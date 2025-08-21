@@ -1,0 +1,117 @@
+package com.eb100.intl.fare.utils;
+
+import java.lang.reflect.Method;
+
+import javax.annotation.Resource;
+
+import org.aspectj.lang.JoinPoint;
+import org.aspectj.lang.annotation.AfterReturning;
+import org.aspectj.lang.annotation.Aspect;
+import org.aspectj.lang.reflect.MethodSignature;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.core.DefaultParameterNameDiscoverer;
+import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.expression.EvaluationContext;
+import org.springframework.expression.Expression;
+import org.springframework.expression.spel.standard.SpelExpressionParser;
+import org.springframework.expression.spel.support.StandardEvaluationContext;
+import org.springframework.stereotype.Component;
+
+import com.eb100.common.cache.redis.CacheRemove;
+ 
+/**
+ * 类名: CacheRemoveAspect <br/>
+ * 说明: 清除缓存切面类. <br/>
+ *
+ * @author mengshj
+ */
+@Component
+@Aspect
+public class CacheRemoveAspect {
+    
+	private static final Logger LOGGER = LoggerFactory.getLogger(CacheRemoveAspect.class);
+	
+	private int dbIndex = 0;
+	
+	/**
+	 * 用于SpEL表达式解析.
+	 */
+	private SpelExpressionParser parser = new SpelExpressionParser();
+	/**
+	 * 用于获取方法参数定义名字.
+	 */
+	private DefaultParameterNameDiscoverer nameDiscoverer = new DefaultParameterNameDiscoverer();
+ 
+    @Resource
+    RedisCacheUtils redis;
+ 
+    /**
+     * 切面在截获方法返回值之后
+     *
+     * @param joinPoint
+     */
+    @AfterReturning(pointcut = "(execution(* *.*(..)) && @annotation(com.eb100.common.cache.redis.CacheRemove))")
+    public void process(JoinPoint joinPoint) {
+    	LOGGER.debug("process() - {}", joinPoint);
+    	
+        // 获取被代理的类
+        Object target = joinPoint.getTarget();
+        // 获取切入方法的数据
+        MethodSignature signature = (MethodSignature) joinPoint.getSignature();
+        // 获取切入方法
+        Method method = signature.getMethod();
+        try {
+        	// 获取真实切入方法
+			Method realMethod = target.getClass().getDeclaredMethod(signature.getName(), method.getParameterTypes());
+			// 获得注解
+	        CacheRemove cacheRemove = AnnotationUtils.findAnnotation(realMethod, CacheRemove.class);
+	        // 获取参数
+	        Object[] args = joinPoint.getArgs();
+	 
+	        if (cacheRemove != null) {
+	            //清除当前类的缓存
+//	            cleanRedisCache("*" + target.getClass().toString() + "*");
+	 
+	            String value = cacheRemove.value();
+	            if (!value.equals("")) {
+	                //缓存的项目所有redis业务部缓存
+	                cleanRedisCache("*" + value + "*");
+	            }
+	            //需要移除的正则key
+	            String[] keys = cacheRemove.key();
+	            for (String key : keys) {
+	            	
+	                //指定清除的key的缓存
+	                cleanRedisCache(generateKeyBySpEL(key, realMethod, args));
+	            }
+	        }
+		} catch (NoSuchMethodException e) {
+			LOGGER.error(e.getMessage(), e);
+		} catch (SecurityException e) {
+			LOGGER.error(e.getMessage(), e);
+		}
+        
+    }
+    
+    String generateKeyBySpEL(String spELString, Method method, Object[] args) {
+    	LOGGER.trace("generateKeyBySpEL() - {}", spELString);
+    	
+        String[] paramNames = nameDiscoverer.getParameterNames(method);
+        Expression expression = parser.parseExpression(spELString);
+        EvaluationContext context = new StandardEvaluationContext();
+        
+        for(int i = 0 ; i < args.length ; i++) {
+            context.setVariable(paramNames[i], args[i]);
+        }
+        return expression.getValue(context).toString();
+    }
+ 
+    void cleanRedisCache(String key) {
+    	LOGGER.trace("cleanRedisCache() - {}", key);
+    	
+        if (key != null) {
+        	redis.batchDel(dbIndex, key);
+        }
+    }
+}
